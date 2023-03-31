@@ -1,0 +1,153 @@
+import sys
+import os
+import cv2
+import numpy as np
+import time
+from threading import Thread
+from threading import Lock
+
+import json
+import zmq
+from google.protobuf.any_pb2 import Any
+from google.protobuf.json_format import MessageToDict
+from google.protobuf.json_format import MessageToJson
+
+# ensure generated pb2 files can be found
+abs_path = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.join(abs_path,'IDL_python'))
+
+from IDL_python import ispfwHeader_pb2
+from IDL_python import MRCInterface_pb2
+from IDL_python import MRCUtils_pb2
+from IDL_python import ONNXRunner_pb2
+from IDL_python import QNNRunner_pb2
+from IDL_python import SNPERunner_pb2
+from IDL_python import TFLiteRunner_pb2
+
+
+class ZMQ_Communicator():
+
+    def __init__(self, endpoint, service_name):
+
+        self.endpoint = endpoint
+        self.service_name = service_name
+        self.previous_frame_id = -1
+
+        self.msg = Any()
+        self.message_mutex = Lock()
+
+        self.message = MRCInterface_pb2
+
+        self.connectTarget()
+
+        print("initialized " + self.service_name)
+
+    def cleanup(self):
+        self.sock.close()
+        self.ctx.term()
+
+    def sendDealerRequest(self, dealerSocket, data, type):
+        dealerSocket.send_string("", zmq.SNDMORE)
+
+        if (type == 0):
+            # data frame
+            dealerSocket.send_string("", zmq.SNDMORE)
+            # Status frame
+            dealerSocket.send_string(data)
+
+        else:
+            # // Data frame
+            dealerSocket.send(data, zmq.SNDMORE)
+            # // Status frame empty
+            dealerSocket.send_string("")
+
+    def connectTarget(self):
+
+        ZMQ_CONNECT = "zmq_connect"
+        ZMQ_DISCONNECT = "zmq_disconnect"
+        ZMQ_CONNECTED = "zmq_connected"
+        ZMQ_DISCONNECTED = "zmq_disconnected"
+        ZMQ_SHUTDOWN = "zmq_shutdown"
+
+        # self.endpoint = self.endpoint_
+
+        self.ctx = zmq.Context()
+        self.sock = self.ctx.socket(zmq.DEALER)
+        self.sock.setsockopt_string(zmq.IDENTITY, self.service_name)
+        self.sock.setsockopt(zmq.LINGER, 0)
+        self.sock.connect(self.endpoint)
+
+        self.poller = zmq.Poller()
+        self.poller.register(self.sock, zmq.POLLIN)
+        self.sendDealerRequest(self.sock, ZMQ_CONNECT, 0)
+        
+        self.socks = dict(self.poller.poll())
+        if self.socks.get(self.sock) == zmq.POLLIN:
+            request = self.sock.recv_multipart()
+            self.message_mutex.acquire()
+            try:
+                self.msg.ParseFromString(request[1])
+                self.msg.Unpack(self.message)
+            except:
+                pass
+            self.message_mutex.release()
+            print ("received handshake response: ", self.msg)
+            print ("message: ", self.message)
+
+    def loadModel(self, mrc_config_message):
+        self.sendDealerRequest(self.sock, mrc_config_message, 1)
+
+        self.socks = dict(self.poller.poll())
+        if self.socks.get(self.sock) == zmq.POLLIN:
+            request = self.sock.recv_multipart()
+            self.message_mutex.acquire()
+            try:
+                self.msg.ParseFromString(request[1])
+                self.msg.Unpack(self.message)
+            except:
+                pass
+            self.message_mutex.release()
+            print ("received load model response: ", self.msg)
+            print ("message: ", self.message)
+
+
+config = json.load(open('squeezenet-classifier.json'))
+mrc_connect_point = str(config["connectionparams"]["host"]) + ":" + str(config["connectionparams"]["port"])
+
+
+MRC_Communicator = ZMQ_Communicator(mrc_connect_point , "MRC_READER")
+
+load_model_request = MRCInterface_pb2.LoadModel_REQ()
+
+load_model_request.payload.modelInfo = json.dumps(config["mrcconfig"])
+load_model_request.payload.modelReferenceId = 0
+
+load_model_request.header.sourceId = "MRC_READER"
+load_model_request.header.messageId = 0
+load_model_request.header.timestamp = 0
+load_model_request.header.crc = 0                   #Check if this is needed
+
+MRC_Communicator.loadModel(load_model_request.SerializeToString())
+
+
+
+# while(1):
+#     # y, _, _, _ = MRC_Communicator.executeGetNextFrame()
+#     # if y.shape[0]:
+#     #     cv2.imshow("demo_display", y)
+#     #     cv2.waitKey(1)
+
+
+#     time.sleep(0.01)
+
+#     pass
+
+#     # if MRC_Communicator.done: ????????????
+#     #     break
+
+
+
+# #     MRC_Communicator.cleanup()
+
+
+
